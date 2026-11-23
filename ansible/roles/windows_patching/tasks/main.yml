@@ -1,0 +1,363 @@
+---
+- name: "Stage 2: Pre-check - validate supported Windows release"
+  ansible.builtin.assert:
+    that:
+      - ansible_os_family == 'Windows'
+      - ansible_distribution is search('Windows (10|11|Server 2016|Server 2019|Server 2022|Server 2025)')
+    fail_msg: "Unsupported Windows release '{{ ansible_distribution }}'."
+  when: not (reboot_only | default(false) | bool)
+
+- name: "Stage 2: Pre-check - ensure Windows Update service is available"
+  ansible.windows.win_service:
+    name: wuauserv
+    state: started
+  when: not (reboot_only | default(false) | bool) and not (clean_cache_only | default(false) | bool)
+
+- name: "Stage 2: Pre-check - configure host WinRM operation timeout"
+  ansible.windows.win_powershell:
+    script: |
+      # Configure WinRM operation timeout to 4 hours (14,400,000 ms) to survive long update installations
+      try {
+          Set-Item -Path WSMan:\LocalHost\MaxTimeoutms -Value 14400000 -ErrorAction Stop
+      } catch {
+          # Ensure network category allows WinRM modifications if set to Public
+          Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
+          Set-Item -Path WSMan:\LocalHost\MaxTimeoutms -Value 14400000 -ErrorAction SilentlyContinue
+      }
+  changed_when: false
+  when: not (reboot_only | default(false) | bool) and not (clean_cache_only | default(false) | bool)
+
+- name: "Stage 2: Pre-check - read free space on system drive"
+  ansible.windows.win_powershell:
+    script: |
+      # Check available free disk space on the system drive
+      $drive = [System.IO.DriveInfo]::new($env:SystemDrive)
+      [PSCustomObject]@{ free_bytes = $drive.AvailableFreeSpace }
+  register: windows_disk_check
+  changed_when: false
+  when: not (reboot_only | default(false) | bool) and not (clean_cache_only | default(false) | bool)
+
+- name: "Stage 2: Pre-check - require at least 5 GiB free space"
+  ansible.builtin.assert:
+    that:
+      - (windows_disk_check.output[0].free_bytes | int) > 5368709120
+    fail_msg: "Pre-check failed: less than 5 GiB is available on the Windows system drive."
+    success_msg: "Pre-check passed: at least 5 GiB is available on the Windows system drive."
+  when: not (reboot_only | default(false) | bool) and not (clean_cache_only | default(false) | bool)
+
+- name: "Stage 2: Pre-check - perform pending reboot before updates if required"
+  ansible.windows.win_reboot:
+    msg: "Reboot requested by Enterprise Patching Platform to clear pending reboot before update installation"
+    reboot_timeout: 14400
+    pre_reboot_delay: 5
+    post_reboot_delay: 60
+    test_command: 'Get-Service -Name WinRM, wuauserv | Where-Object { $_.Status -eq "Running" }'
+  register: windows_pre_reboot_result
+  when:
+    - not (reboot_only | default(false) | bool)
+    - not (clean_cache_only | default(false) | bool)
+    - patching_reboot_required | default(false) | bool
+
+- name: "Stage 2: Pre-check - clear reboot required flag after pre-patch reboot"
+  ansible.builtin.set_fact:
+    patching_reboot_required: false
+  when: patching_reboot_required | default(false) | bool
+
+- name: "Stage 2: Pre-check - ensure servicing stack is ready after pre-patch reboot"
+  ansible.windows.win_powershell:
+    script: |
+      # Allow servicing stack to settle and ensure Windows Update service is active
+      Start-Sleep -Seconds 10
+      Get-Service -Name wuauserv | Start-Service -ErrorAction SilentlyContinue
+  changed_when: false
+  when: windows_pre_reboot_result is defined and (windows_pre_reboot_result.rebooted | default(false) | bool)
+
+- name: "Stage 3: Update - execute Windows updates with automated self-healing remediation"
+  when: not (reboot_only | default(false) | bool) and not (clean_cache_only | default(false) | bool)
+  block:
+    - name: "Stage 3: Update - install Security Updates only"
+      ansible.windows.win_updates:
+        category_names:
+          - SecurityUpdates
+        state: installed
+        reboot: true
+        reboot_timeout: 14400
+      register: windows_security_result
+      failed_when: >-
+        (windows_security_result.failed | default(false) | bool) and
+        (
+          (windows_security_result.failed_update_count | default(0) | int == 0 and not (windows_security_result.msg | default('') is search('reboot is required'))) or
+          ((windows_security_result.updates | default({}) | dict2items |
+            selectattr('value.failure_hresult_code', 'defined') | list | length) !=
+            (windows_security_result.failed_update_count | default(0) | int)) or
+          ((windows_security_result.updates | default({}) | dict2items |
+            selectattr('value.failure_hresult_code', 'defined') |
+            map(attribute='value.failure_hresult_code') | map('string') |
+            reject('equalto', '2149842967') | list | length) > 0)
+        )
+      when: update_type | default('security') == 'security'
+
+    - name: "Stage 3: Update - install regular updates without OS upgrades"
+      ansible.windows.win_updates:
+        category_names:
+          - CriticalUpdates
+          - SecurityUpdates
+          - UpdateRollups
+          - Updates
+          - DefinitionUpdates
+          - Drivers
+          - FeaturePacks
+          - ServicePacks
+          - Tools
+        state: installed
+        reboot: true
+        reboot_timeout: 14400
+      register: windows_regular_result
+      failed_when: >-
+        (windows_regular_result.failed | default(false) | bool) and
+        (
+          (windows_regular_result.failed_update_count | default(0) | int == 0 and not (windows_regular_result.msg | default('') is search('reboot is required'))) or
+          ((windows_regular_result.updates | default({}) | dict2items |
+            selectattr('value.failure_hresult_code', 'defined') | list | length) !=
+            (windows_regular_result.failed_update_count | default(0) | int)) or
+          ((windows_regular_result.updates | default({}) | dict2items |
+            selectattr('value.failure_hresult_code', 'defined') |
+            map(attribute='value.failure_hresult_code') | map('string') |
+            reject('equalto', '2149842967') | list | length) > 0)
+        )
+      when: update_type | default('security') == 'regular'
+
+  rescue:
+    - name: "Stage 3: Auto-Remediation - record detected failure and initiate self-healing"
+      ansible.builtin.debug:
+        msg: >-
+          Windows update encountered an installation, rollback, or connection error.
+          Initiating automated self-healing pipeline: waiting for host connection, purging SoftwareDistribution download cache, repairing component store with DISM, and verifying system files with SFC.
+
+    - name: "Stage 3: Auto-Remediation - wait for host to be fully reachable and responsive"
+      ansible.builtin.wait_for_connection:
+        delay: 15
+        timeout: 900
+        connect_timeout: 10
+
+    - name: "Stage 3: Auto-Remediation - clear SoftwareDistribution download cache"
+      ansible.windows.win_powershell:
+        script: |
+          # 1. Stop Windows Update service to unlock downloaded update files
+          Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
+
+          # 2. Delete cached update download packages
+          Remove-Item -Path "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
+
+          # 3. Restart Windows Update service
+          Start-Service -Name wuauserv -ErrorAction SilentlyContinue
+      register: cache_clear_result
+      until: cache_clear_result is not failed
+      retries: 5
+      delay: 10
+      changed_when: true
+
+    - name: "Stage 3: Auto-Remediation - repair Windows Component Store via DISM"
+      ansible.windows.win_powershell:
+        script: |
+          # 4. Repair Windows Component Store via DISM
+          dism.exe /Online /Cleanup-Image /RestoreHealth
+          [PSCustomObject]@{
+              ExitCode = $LASTEXITCODE
+          }
+      register: dism_repair_result
+      changed_when: true
+      failed_when: false
+
+    - name: "Stage 3: Auto-Remediation - verify system file integrity via SFC"
+      ansible.windows.win_powershell:
+        script: |
+          # 5. Scan and repair protected system files via SFC
+          sfc.exe /scannow
+          [PSCustomObject]@{
+              ExitCode = $LASTEXITCODE
+          }
+      register: sfc_repair_result
+      changed_when: true
+      failed_when: false
+
+    - name: "Stage 3: Auto-Remediation - reboot host if component repair requires it"
+      ansible.windows.win_reboot:
+        msg: "Reboot requested by Enterprise Patching Platform after DISM component store repair"
+        reboot_timeout: 14400
+        pre_reboot_delay: 5
+        post_reboot_delay: 60
+        test_command: 'Get-Service -Name WinRM, wuauserv | Where-Object { $_.Status -eq "Running" }'
+      when: (dism_repair_result.output[0].ExitCode | default(0) | int) == 3010
+
+    - name: "Stage 3: Auto-Remediation - retry Security Updates installation"
+      ansible.windows.win_updates:
+        category_names:
+          - SecurityUpdates
+        state: installed
+        reboot: true
+        reboot_timeout: 14400
+      register: windows_security_result
+      failed_when: >-
+        (windows_security_result.failed | default(false) | bool) and
+        (
+          (windows_security_result.failed_update_count | default(0) | int == 0 and not (windows_security_result.msg | default('') is search('reboot is required'))) or
+          ((windows_security_result.updates | default({}) | dict2items |
+            selectattr('value.failure_hresult_code', 'defined') | list | length) !=
+            (windows_security_result.failed_update_count | default(0) | int)) or
+          ((windows_security_result.updates | default({}) | dict2items |
+            selectattr('value.failure_hresult_code', 'defined') |
+            map(attribute='value.failure_hresult_code') | map('string') |
+            reject('equalto', '2149842967') | list | length) > 0)
+        )
+      when: update_type | default('security') == 'security'
+
+    - name: "Stage 3: Auto-Remediation - retry regular updates installation"
+      ansible.windows.win_updates:
+        category_names:
+          - CriticalUpdates
+          - SecurityUpdates
+          - UpdateRollups
+          - Updates
+          - DefinitionUpdates
+          - Drivers
+          - FeaturePacks
+          - ServicePacks
+          - Tools
+        state: installed
+        reboot: true
+        reboot_timeout: 14400
+      register: windows_regular_result
+      failed_when: >-
+        (windows_regular_result.failed | default(false) | bool) and
+        (
+          (windows_regular_result.failed_update_count | default(0) | int == 0 and not (windows_regular_result.msg | default('') is search('reboot is required'))) or
+          ((windows_regular_result.updates | default({}) | dict2items |
+            selectattr('value.failure_hresult_code', 'defined') | list | length) !=
+            (windows_regular_result.failed_update_count | default(0) | int)) or
+          ((windows_regular_result.updates | default({}) | dict2items |
+            selectattr('value.failure_hresult_code', 'defined') |
+            map(attribute='value.failure_hresult_code') | map('string') |
+            reject('equalto', '2149842967') | list | length) > 0)
+        )
+      when: update_type | default('security') == 'regular'
+
+- name: "Stage 3: Update - record skipped non-applicable security updates"
+  ansible.builtin.debug:
+    msg:
+      skipped_non_applicable_updates: >-
+        {{ windows_security_result.updates | default({}) | dict2items |
+           selectattr('value.failure_hresult_code', 'defined') |
+           selectattr('value.failure_hresult_code', 'equalto', 2149842967) |
+           map(attribute='value.title') | list }}
+  when:
+    - not (reboot_only | default(false) | bool)
+    - update_type | default('security') == 'security'
+    - (windows_security_result.failed_update_count | default(0) | int) > 0
+
+- name: "Stage 3: Update - record skipped non-applicable regular updates"
+  ansible.builtin.debug:
+    msg:
+      skipped_non_applicable_updates: >-
+        {{ windows_regular_result.updates | default({}) | dict2items |
+           selectattr('value.failure_hresult_code', 'defined') |
+           selectattr('value.failure_hresult_code', 'equalto', 2149842967) |
+           map(attribute='value.title') | list }}
+  when:
+    - not (reboot_only | default(false) | bool)
+    - update_type | default('security') == 'regular'
+    - (windows_regular_result.failed_update_count | default(0) | int) > 0
+
+- name: "Stage 3: Update - record completed Windows update identifiers"
+  ansible.builtin.debug:
+    msg:
+      updates: "{{ windows_security_result.updates | default({}) if update_type | default('security') == 'security' else windows_regular_result.updates | default({}) }}"
+  when:
+    - update_type | default('security') in ['security', 'regular']
+    - (windows_security_result is defined and (windows_security_result.changed | default(false))) or
+      (windows_regular_result is defined and (windows_regular_result.changed | default(false)))
+
+- name: "Stage 3: Clean & Reset Windows Update Cache"
+  block:
+    - name: "Stage 3: Cache - stop Windows Update and BITS services"
+      ansible.windows.win_service:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - wuauserv
+        - bits
+        - cryptsvc
+
+    - name: "Stage 3: Cache - purge SoftwareDistribution download and datastore cache"
+      ansible.windows.win_powershell:
+        script: |
+          Remove-Item -Path "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "C:\Windows\SoftwareDistribution\DataStore\*" -Recurse -Force -ErrorAction SilentlyContinue
+
+    - name: "Stage 3: Cache - restart Windows Update services"
+      ansible.windows.win_service:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - cryptsvc
+        - bits
+        - wuauserv
+  when: clean_cache_only | default(false) | bool
+
+- name: "Stage 4: Reboot - determine whether Windows requires a reboot"
+  ansible.builtin.set_fact:
+    patching_reboot_required: >-
+      {{ (reboot_only | default(false) | bool) or
+         (force_reboot | default(false) | bool) or
+         (windows_security_result.reboot_required | default(false) | bool) or
+         (windows_regular_result.reboot_required | default(false) | bool) or
+         (patching_reboot_required | default(false) | bool) }}
+    patching_reboot_status_known: true
+  when: not (clean_cache_only | default(false) | bool)
+
+- name: "Stage 4: Reboot - perform controlled Windows reboot when required"
+  ansible.windows.win_reboot:
+    msg: "Reboot requested by the Enterprise OS Patching Platform"
+    reboot_timeout: 14400
+    pre_reboot_delay: 5
+    post_reboot_delay: 30
+    test_command: "Get-Service -Name WinRM"
+  register: windows_reboot_result
+  when:
+    - not (clean_cache_only | default(false) | bool)
+    - patching_reboot_required | default(false) | bool
+
+- name: "Stage 4: Reboot - record that no reboot is needed"
+  ansible.builtin.debug:
+    msg: "No reboot was reported by Windows Update or the reboot registry markers."
+  when:
+    - not (clean_cache_only | default(false) | bool)
+    - not (patching_reboot_required | default(false) | bool)
+
+- name: "Stage 5: Verification - search for remaining Windows updates"
+  ansible.windows.win_updates:
+    category_names: '*'
+    state: searched
+  register: windows_post_patch_search
+  when: not (reboot_only | default(false) | bool) and not (clean_cache_only | default(false) | bool)
+
+- name: "Stage 5: Verification - emit Windows patch result"
+  ansible.builtin.debug:
+    msg:
+      stage: Verification
+      status: Success
+      os_name: "{{ ansible_distribution }}"
+      os_version: "{{ ansible_distribution_version }}"
+      reboot_performed: >-
+        {{ (windows_reboot_result.rebooted | default(false) | bool) or
+           (windows_security_result.rebooted | default(false) | bool) or
+           (windows_regular_result.rebooted | default(false) | bool) or
+           (windows_pre_reboot_result.rebooted | default(false) | bool) }}
+      reboot_required: "{{ patching_reboot_required | default(false) | bool }}"
+      reboot_status_known: true
+      pending_updates: "{{ windows_post_patch_search.found_update_count | default(0) | int }}"
+      security_updates: >-
+        {{ windows_post_patch_search.updates | default({}) | dict2items |
+           selectattr('value.categories', 'defined') |
+           selectattr('value.categories', 'contains', 'Security Updates') | list | length }}
+  when: not (reboot_only | default(false) | bool) and not (clean_cache_only | default(false) | bool)

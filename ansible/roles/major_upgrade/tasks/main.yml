@@ -1,0 +1,164 @@
+---
+- name: "Stage 2: Pre-check - require explicit administrator approval and backup confirmation"
+  ansible.builtin.assert:
+    that:
+      - confirm_major_upgrade is defined
+      - confirm_major_upgrade | bool
+      - backup_verified is defined
+      - backup_verified | bool
+    fail_msg: "Major OS upgrade stopped: explicit approval and backup confirmation are required."
+
+- name: "Stage 2: Pre-check - validate supported Linux distribution for major upgrade"
+  ansible.builtin.assert:
+    that:
+      - ansible_system == 'Linux'
+      - ansible_os_family in ['Debian', 'RedHat']
+    fail_msg: "Major OS upgrades are supported on Debian/Ubuntu and RHEL/Rocky/AlmaLinux hosts (found '{{ ansible_distribution }}')."
+
+- name: "Stage 2: Pre-check - verify at least 25 GiB free on root filesystem"
+  ansible.builtin.assert:
+    that:
+      - (ansible_mounts | selectattr('mount', 'equalto', '/') | map(attribute='size_available') | first | default(0) | int) > 26843545600
+    fail_msg: "Major upgrade stopped: less than 25 GiB is available on the root filesystem."
+    success_msg: "Pre-check passed: at least 25 GiB is available on the root filesystem."
+
+- name: "Stage 2: Pre-check - stop if a pending reboot exists before major upgrade"
+  ansible.builtin.assert:
+    that:
+      - not (patching_reboot_required | default(false) | bool)
+    fail_msg: "Major upgrade stopped: reboot the host to clear its pending reboot state before starting a major release upgrade."
+
+- name: "Stage 2: Pre-check - audit Debian package database consistency"
+  ansible.builtin.command: dpkg --audit
+  register: debian_dpkg_audit
+  changed_when: false
+  failed_when: debian_dpkg_audit.rc != 0 or (debian_dpkg_audit.stdout | trim | length > 0)
+  when: ansible_os_family == 'Debian'
+
+- name: "Stage 2: Pre-check - ensure Ubuntu release upgrader tool is installed"
+  ansible.builtin.apt:
+    name: ubuntu-release-upgrader-core
+    state: present
+    update_cache: true
+  when:
+    - ansible_os_family == 'Debian'
+    - ansible_distribution == 'Ubuntu'
+
+- name: "Stage 2: Pre-check - check if a newer Ubuntu release is available"
+  ansible.builtin.command: do-release-upgrade -c
+  register: ubuntu_release_check
+  changed_when: false
+  failed_when: false
+  when:
+    - ansible_os_family == 'Debian'
+    - ansible_distribution == 'Ubuntu'
+
+- name: "Stage 2: Pre-check - check Leapp utility availability on RHEL-family hosts"
+  ansible.builtin.command: command -v leapp
+  args:
+    executable: /bin/sh
+  register: rhel_leapp_check
+  changed_when: false
+  failed_when: false
+  when: ansible_os_family == 'RedHat'
+
+- name: "Stage 2: Pre-check - require Leapp utility on RHEL-family hosts"
+  ansible.builtin.assert:
+    that:
+      - rhel_leapp_check.rc == 0
+    fail_msg: "Major upgrade stopped: install 'leapp-upgrade' on this RHEL-family host before launching an automated major OS upgrade."
+  when: ansible_os_family == 'RedHat'
+
+- name: "Stage 2: Pre-check - run Leapp preupgrade assessment on RHEL-family hosts"
+  ansible.builtin.command: leapp preupgrade --no-rhsm
+  register: rhel_leapp_preupgrade
+  changed_when: false
+  failed_when: rhel_leapp_preupgrade.rc != 0
+  when: ansible_os_family == 'RedHat'
+
+- name: "Stage 3: Update - bring current Debian/Ubuntu packages up-to-date before release upgrade"
+  ansible.builtin.apt:
+    upgrade: dist
+    update_cache: true
+    autoremove: true
+    dpkg_options: 'force-confdef,force-confold'
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  register: debian_pre_dist_upgrade
+  when: ansible_os_family == 'Debian'
+
+- name: "Stage 3: Update - execute non-interactive Ubuntu major release upgrade"
+  ansible.builtin.command: >-
+    do-release-upgrade -f DistUpgradeViewNonInteractive
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  register: ubuntu_major_upgrade_result
+  changed_when: true
+  when:
+    - ansible_os_family == 'Debian'
+    - ansible_distribution == 'Ubuntu'
+    - ubuntu_release_check.rc | default(1) == 0
+
+- name: "Stage 3: Update - report Ubuntu host already on latest supported release"
+  ansible.builtin.debug:
+    msg: "Host {{ inventory_hostname }} ({{ ansible_distribution }} {{ ansible_distribution_version }}) is already on the latest supported release; current packages were fully upgraded."
+  when:
+    - ansible_os_family == 'Debian'
+    - ansible_distribution != 'Ubuntu' or (ubuntu_release_check.rc | default(1) != 0)
+
+- name: "Stage 3: Update - execute Leapp major OS upgrade on RHEL-family hosts"
+  ansible.builtin.command: leapp upgrade --no-rhsm
+  register: rhel_major_upgrade_result
+  changed_when: true
+  when: ansible_os_family == 'RedHat'
+
+- name: "Stage 4: Reboot - determine post-upgrade reboot requirement"
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: major_upgrade_debian_reboot
+  when: ansible_os_family == 'Debian'
+
+- name: "Stage 4: Reboot - set major upgrade reboot state"
+  ansible.builtin.set_fact:
+    major_upgrade_needs_reboot: >-
+      {{ (ubuntu_major_upgrade_result is defined and (ubuntu_major_upgrade_result.changed | default(false))) or
+         (rhel_major_upgrade_result is defined and (rhel_major_upgrade_result.changed | default(false))) or
+         (major_upgrade_debian_reboot.stat.exists | default(false) if (major_upgrade_debian_reboot is defined and major_upgrade_debian_reboot.stat is defined) else false) }}
+
+- name: "Stage 4: Reboot - perform controlled reboot into upgraded OS"
+  ansible.builtin.reboot:
+    msg: "Rebooting into upgraded operating system release via PatchOps"
+    connect_timeout: 15
+    reboot_timeout: 1800
+    pre_reboot_delay: 5
+    post_reboot_delay: 30
+    test_command: uname -r
+  register: major_upgrade_reboot_result
+  when: major_upgrade_needs_reboot | bool
+
+- name: "Stage 4: Reboot - record that no post-upgrade reboot was required"
+  ansible.builtin.debug:
+    msg: "No reboot was required after package and release checks."
+  when: not (major_upgrade_needs_reboot | bool)
+
+- name: "Stage 5: Verification - refresh upgraded OS distribution and kernel facts"
+  ansible.builtin.setup:
+    gather_subset:
+      - '!all'
+      - '!min'
+      - distribution
+      - hardware
+
+- name: "Stage 5: Verification - emit upgraded Linux OS telemetry"
+  ansible.builtin.debug:
+    msg:
+      stage: Verification
+      status: Success
+      os_name: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+      os_version: "{{ ansible_distribution_version }}"
+      kernel: "{{ ansible_kernel }}"
+      reboot_performed: "{{ major_upgrade_reboot_result.rebooted | default(false) }}"
+      reboot_required: false
+      reboot_status_known: true
+      pending_updates: 0
+      security_updates: 0

@@ -1,0 +1,35 @@
+apiVersion: awx.ansible.com/v1beta1
+kind: AWX
+metadata:
+  name: awx
+  namespace: awx
+spec:
+  admin_user: admin
+  service_type: NodePort
+  nodeport_port: 30080
+  replicas: 1
+  no_log: true
+  garbage_collect_secrets: false
+  projects_persistence: false
+  postgres_keepalives: true
+  postgres_keepalives_count: 5
+  postgres_keepalives_idle: 5
+  postgres_keepalives_interval: 5
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: awx-ingress
+  namespace: awx
+spec:
+  ingressClassName: traefik
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: awx-service
+                port:
+                  number: 80

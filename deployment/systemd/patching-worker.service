@@ -1,0 +1,24 @@
+[Unit]
+Description=PatchOps AWX Dispatcher and Schedule Worker
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=patching-platform
+Group=patching-platform
+WorkingDirectory=/opt/patching-platform/current/backend
+EnvironmentFile=/etc/patching-platform/patching.env
+ExecStart=/opt/patching-platform/venv/bin/python -m app.worker
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateDevices=true
+LockPersonality=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

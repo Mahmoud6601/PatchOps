@@ -1,0 +1,14 @@
+# Fallback Ansible Galaxy collection requirements for AWX Project Sync.
+# Ensures `community.general` (required for SUSE zypper tasks), `ansible.windows`,
+# and `ansible.posix` are installed automatically even when running on the
+# default `quay.io/ansible/awx-ee:24.6.1` image.
+# For fast ~2s AWX Project Syncs, build and assign the custom EE in
+# `execution-environment/execution-environment.yml` (which pre-bakes these
+# collections from `requirements.ee.yml`).
+collections:
+  - name: ansible.windows
+    version: ">=2.2.0"
+  - name: ansible.posix
+    version: ">=1.5.4"
+  - name: community.general
+    version: ">=8.3.0"

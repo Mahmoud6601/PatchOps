@@ -1,0 +1,10 @@
+---
+# Dynamic includes prevent AWX from emitting skipped Linux tasks for a Windows
+# host (and vice versa), keeping the live stage timeline meaningful.
+- name: Load Linux discovery workflow
+  ansible.builtin.include_tasks: linux.yml
+  when: ansible_system == 'Linux'
+
+- name: Load Windows discovery workflow
+  ansible.builtin.include_tasks: windows.yml
+  when: ansible_os_family == 'Windows'

@@ -1,0 +1,112 @@
+# Production TLS + Hardened Nginx configuration for mgmt-srv (2-Server Architecture: mgmt + awx)
+# Installed automatically by deployment/scripts/harden-infra.sh
+
+limit_req_zone $binary_remote_addr zone=patchops_login:10m rate=10r/m;
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    server_tokens off;
+
+    # Internal Ansible Playbook Git HTTP endpoint (restricted strictly to AWX node & localhost)
+    location ~ ^/git(/.*) {
+        allow 127.0.0.1;
+        allow ::1;
+        allow __AWX_SERVER_IP__;
+        deny all;
+
+        client_max_body_size 50M;
+        fastcgi_pass unix:/run/fcgiwrap.socket;
+        fastcgi_param SCRIPT_FILENAME /usr/lib/git-core/git-http-backend;
+        fastcgi_param GIT_HTTP_EXPORT_ALL "";
+        fastcgi_param GIT_PROJECT_ROOT /var/git;
+        fastcgi_param PATH_INFO $1;
+        include fastcgi_params;
+    }
+
+    # Enforce HTTPS for all UI and REST API traffic
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2 default_server;
+    listen [::]:443 ssl http2 default_server;
+    server_name _;
+    server_tokens off;
+
+    ssl_certificate     /etc/ssl/certs/patching-platform.crt;
+    ssl_certificate_key /etc/ssl/private/patching-platform.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_cache   shared:PatchOpsSSL:10m;
+    ssl_session_timeout 1d;
+
+    root /opt/patching-platform/current/frontend/dist;
+    index index.html;
+    client_max_body_size 50M;
+
+    include /etc/nginx/snippets/patchops-security-headers.conf;
+
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+
+    # Brute-force rate limiting on authentication endpoint
+    location = /api/auth/login {
+        limit_req zone=patchops_login burst=5 nodelay;
+        limit_req_status 429;
+
+        include /etc/nginx/snippets/patchops-security-headers.conf;
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+        proxy_connect_timeout 30s;
+    }
+
+    # Real-Time Server-Sent Events (SSE) — unbuffered streaming
+    location ^~ /api/stream/ {
+        include /etc/nginx/snippets/patchops-security-headers.conf;
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # Backend REST API
+    location ^~ /api/ {
+        include /etc/nginx/snippets/patchops-security-headers.conf;
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        proxy_connect_timeout 75s;
+    }
+
+    # Static assets caching (repeat security headers because add_header overrides parent scope)
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 30d;
+        include /etc/nginx/snippets/patchops-security-headers.conf;
+        add_header Cache-Control "public, no-transform" always;
+    }
+
+    # Frontend SPA Routing
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

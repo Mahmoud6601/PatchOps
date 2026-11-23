@@ -1,0 +1,28 @@
+---
+- name: "Stage 3: Update - install SUSE security patches"
+  community.general.zypper:
+    name: '*'
+    type: patch
+    state: latest
+    update_cache: true
+    extra_args: --category security
+  register: zypper_security_result
+  when:
+    - not (reboot_only | default(false) | bool)
+    - not (clean_cache_only | default(false) | bool)
+    - ansible_os_family == 'Suse'
+    - update_type | default('security') == 'security'
+
+- name: "Stage 3: Update - install SUSE regular package updates"
+  community.general.zypper:
+    name: '*'
+    type: package
+    state: latest
+    update_cache: true
+  register: zypper_regular_result
+  when:
+    - not (reboot_only | default(false) | bool)
+    - not (clean_cache_only | default(false) | bool)
+    - ansible_os_family == 'Suse'
+    - update_type | default('security') == 'regular'
+

@@ -1,0 +1,98 @@
+---
+- name: "Stage 1: Discovery - confirm supported Linux family"
+  ansible.builtin.assert:
+    that:
+      - ansible_os_family in ['Debian', 'RedHat', 'Suse']
+    fail_msg: "Unsupported Linux family '{{ ansible_os_family }}'; discovery data was not accepted."
+
+- name: "Stage 1: Discovery - refresh APT metadata"
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  changed_when: false
+  when: ansible_os_family == 'Debian'
+
+- name: "Stage 1: Discovery - classify APT security updates from signed repository origins"
+  ansible.builtin.script: apt_update_inventory.py
+  register: apt_update_inventory
+  changed_when: false
+  when: ansible_os_family == 'Debian'
+
+- name: "Stage 1: Discovery - check Debian reboot marker"
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: debian_reboot_marker
+  when: ansible_os_family == 'Debian'
+
+- name: "Stage 1: Discovery - check RHEL update inventory in check mode"
+  ansible.builtin.dnf:
+    name: '*'
+    state: latest
+    update_only: true
+  check_mode: true
+  register: dnf_update_inventory
+  changed_when: false
+  when: ansible_os_family == 'RedHat'
+
+- name: "Stage 1: Discovery - check RHEL security update inventory in check mode"
+  ansible.builtin.dnf:
+    name: '*'
+    state: latest
+    update_only: true
+    security: true
+  check_mode: true
+  register: dnf_security_inventory
+  changed_when: false
+  when: ansible_os_family == 'RedHat'
+
+- name: "Load SUSE discovery workflow"
+  ansible.builtin.include_tasks: suse.yml
+  when: ansible_os_family == 'Suse'
+
+- name: "Stage 1: Discovery - check RHEL reboot requirement"
+  ansible.builtin.command: needs-restarting -r
+  register: rhel_reboot_check
+  failed_when: false
+  changed_when: false
+  when: ansible_os_family == 'RedHat'
+
+- name: "Stage 1: Discovery - check SUSE reboot requirement"
+  ansible.builtin.command: needs-restarting -r
+  register: suse_reboot_check
+  failed_when: false
+  changed_when: false
+  when: ansible_os_family == 'Suse'
+
+- name: "Stage 1: Discovery - collect Linux update and reboot counts"
+  ansible.builtin.set_fact:
+    patching_reboot_status_known: >-
+      {{ ansible_os_family == 'Debian' or
+         (ansible_os_family == 'RedHat' and rhel_reboot_check.rc | default(127) in [0, 1]) or
+         (ansible_os_family == 'Suse' and suse_reboot_check.rc | default(127) in [0, 1]) }}
+    patching_reboot_required: >-
+      {{ (debian_reboot_marker.stat.exists | default(false)) if ansible_os_family == 'Debian' else
+         ((rhel_reboot_check.rc | default(0)) == 1) if ansible_os_family == 'RedHat' else
+         ((suse_reboot_check.rc | default(0)) == 1) if ansible_os_family == 'Suse' else false }}
+    pending_updates_count: >-
+      {{ (apt_update_inventory.stdout | from_json).pending_count | int if ansible_os_family == 'Debian' else
+         (dnf_update_inventory.results | default([]) | length) if ansible_os_family == 'RedHat' else
+         (suse_update_inventory.results | default([]) | length) if ansible_os_family == 'Suse' else none }}
+    security_updates_count: >-
+      {{ (apt_update_inventory.stdout | from_json).security_count | int if ansible_os_family == 'Debian' else
+         (dnf_security_inventory.results | default([]) | length) if ansible_os_family == 'RedHat' else
+         (suse_security_inventory.results | default([]) | length) if ansible_os_family == 'Suse' else none }}
+
+- name: "Stage 1: Discovery - emit Linux system metadata"
+  ansible.builtin.debug:
+    msg:
+      os_name: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+      os_version: "{{ ansible_distribution_version }}"
+      kernel: "{{ ansible_kernel }}"
+      arch: "{{ ansible_architecture }}"
+      cpu_cores: "{{ ansible_processor_vcpus | default(ansible_processor_count | default(1)) }}"
+      ram_mb: "{{ ansible_memtotal_mb }}"
+      reboot_required: "{{ patching_reboot_required | default(none) }}"
+      reboot_status_known: "{{ patching_reboot_status_known | default(false) }}"
+      pending_updates: "{{ pending_updates_count | default(none) }}"
+      security_updates: "{{ security_updates_count | default(none) }}"
+      package_manager: "{{ {'Debian': 'apt', 'RedHat': 'dnf', 'Suse': 'zypper'}[ansible_os_family] }}"

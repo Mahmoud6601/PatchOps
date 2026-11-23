@@ -1,0 +1,57 @@
+{
+  "awx_version": "24.6.1",
+  "awx_jobs_settings": {
+    "AWX_COLLECTIONS_ENABLED": false,
+    "AWX_ROLES_ENABLED": false
+  },
+  "project": {
+    "name": "OS-Patching-Playbooks",
+    "scm_type": "git",
+    "scm_url": "http://<MGMT_SERVER_IP>/git/patching-playbooks.git",
+    "scm_branch": "main",
+    "scm_update_on_launch": true,
+    "scm_update_cache_timeout": 300
+  },
+  "inventory": {
+    "name": "Enterprise-Managed-Servers",
+    "description": "Managed dynamically via PatchOps FastAPI AWX client"
+  },
+  "job_templates": [
+    {
+      "name": "Template-OS-Discovery",
+      "env_var": "AWX_DISCOVERY_TEMPLATE_NAME",
+      "playbook": "playbooks/discovery.yml",
+      "ask_credential_on_launch": true,
+      "ask_limit_on_launch": true,
+      "ask_variables_on_launch": true,
+      "ask_inventory_on_launch": false
+    },
+    {
+      "name": "Template-Security-Patching",
+      "env_var": "AWX_SECURITY_TEMPLATE_NAME",
+      "playbook": "playbooks/patch_security.yml",
+      "ask_credential_on_launch": true,
+      "ask_limit_on_launch": true,
+      "ask_variables_on_launch": true,
+      "ask_inventory_on_launch": false
+    },
+    {
+      "name": "Template-Regular-Patching",
+      "env_var": "AWX_REGULAR_TEMPLATE_NAME",
+      "playbook": "playbooks/patch_regular.yml",
+      "ask_credential_on_launch": true,
+      "ask_limit_on_launch": true,
+      "ask_variables_on_launch": true,
+      "ask_inventory_on_launch": false
+    },
+    {
+      "name": "Template-Major-OS-Upgrade",
+      "env_var": "AWX_MAJOR_UPGRADE_TEMPLATE_NAME",
+      "playbook": "playbooks/upgrade_major_os.yml",
+      "ask_credential_on_launch": true,
+      "ask_limit_on_launch": true,
+      "ask_variables_on_launch": true,
+      "ask_inventory_on_launch": false
+    }
+  ]
+}

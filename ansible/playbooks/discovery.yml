@@ -1,0 +1,7 @@
+---
+- name: "Enterprise OS Discovery Pipeline"
+  hosts: all
+  become: "{{ ansible_connection | default('ssh') != 'winrm' }}"
+  gather_facts: yes
+  roles:
+    - discovery

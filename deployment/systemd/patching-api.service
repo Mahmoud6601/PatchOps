@@ -1,0 +1,24 @@
+[Unit]
+Description=PatchOps FastAPI Management API
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=patching-platform
+Group=patching-platform
+WorkingDirectory=/opt/patching-platform/current/backend
+EnvironmentFile=/etc/patching-platform/patching.env
+ExecStart=/opt/patching-platform/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 4 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateDevices=true
+LockPersonality=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

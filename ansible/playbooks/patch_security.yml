@@ -1,0 +1,21 @@
+---
+- name: "Security Patching Pipeline"
+  hosts: all
+  become: "{{ ansible_connection | default('ssh') != 'winrm' }}"
+  vars:
+    update_type: "security"
+  tasks:
+    - name: Run discovery workflow
+      ansible.builtin.include_role:
+        name: discovery
+      when: not (reboot_only | default(false) | bool) and not (clean_cache_only | default(false) | bool)
+
+    - name: Run Linux patch workflow
+      ansible.builtin.include_role:
+        name: linux_patching
+      when: ansible_system == "Linux"
+
+    - name: Run Windows patch workflow
+      ansible.builtin.include_role:
+        name: windows_patching
+      when: ansible_os_family == "Windows"

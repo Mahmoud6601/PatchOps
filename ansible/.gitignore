@@ -1,0 +1,11 @@
+inventory/hosts.yml
+inventory/hosts.yml.*
+!inventory/hosts.yml.example
+*.pem
+*.key
+*.vault
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]

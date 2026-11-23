@@ -1,0 +1,21 @@
+---
+- name: "Stage 5: Verification - recount SUSE pending packages in check mode"
+  community.general.zypper:
+    name: '*'
+    type: package
+    state: latest
+  check_mode: true
+  register: final_suse_inventory
+  changed_when: false
+  when: ansible_os_family == 'Suse' and not (reboot_only | default(false) | bool) and not (clean_cache_only | default(false) | bool)
+
+- name: "Stage 5: Verification - recount SUSE security patches in check mode"
+  community.general.zypper:
+    name: '*'
+    type: patch
+    state: latest
+    extra_args: --category security
+  check_mode: true
+  register: final_suse_security_inventory
+  changed_when: false
+  when: ansible_os_family == 'Suse' and not (reboot_only | default(false) | bool) and not (clean_cache_only | default(false) | bool)

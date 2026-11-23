@@ -1,0 +1,58 @@
+# Internal LAN HTTP Nginx configuration for mgmt-srv (2-Server Architecture: mgmt + awx)
+# Serves PatchOps SPA, proxies FastAPI /api/, and serves /git/patching-playbooks.git exclusively to AWX.
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    root /opt/patching-platform/current/frontend/dist;
+    index index.html;
+
+    client_max_body_size 50M;
+
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+
+    # Internal Ansible Playbook Git HTTP endpoint (restricted to AWX node & localhost)
+    location ~ ^/git(/.*) {
+        allow 127.0.0.1;
+        allow ::1;
+        allow 10.20.0.20;
+        deny all;
+
+        fastcgi_pass unix:/run/fcgiwrap.socket;
+        fastcgi_param SCRIPT_FILENAME /usr/lib/git-core/git-http-backend;
+        fastcgi_param GIT_HTTP_EXPORT_ALL "";
+        fastcgi_param GIT_PROJECT_ROOT /var/git;
+        fastcgi_param PATH_INFO $1;
+        include fastcgi_params;
+    }
+
+    # Backend REST API
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        proxy_connect_timeout 75s;
+    }
+
+    # Static assets caching
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 30d;
+        add_header Cache-Control "public, no-transform";
+    }
+
+    # Frontend SPA Routing
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

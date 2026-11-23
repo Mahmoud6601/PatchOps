@@ -1,0 +1,21 @@
+---
+- name: "Stage 1: Discovery - check SUSE pending package inventory in check mode"
+  community.general.zypper:
+    name: '*'
+    type: package
+    state: latest
+  check_mode: true
+  register: suse_update_inventory
+  changed_when: false
+  when: ansible_os_family == 'Suse'
+
+- name: "Stage 1: Discovery - check SUSE security patches in check mode"
+  community.general.zypper:
+    name: '*'
+    type: patch
+    state: latest
+    extra_args: --category security
+  check_mode: true
+  register: suse_security_inventory
+  changed_when: false
+  when: ansible_os_family == 'Suse'

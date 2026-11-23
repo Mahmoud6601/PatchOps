@@ -1,0 +1,14 @@
+# Custom Execution Environment (EE) / local workstation collection dependencies.
+# Standard `quay.io/ansible/awx-ee:24.6.1` does NOT bundle `community.general`.
+# Use this file when building the custom Execution Environment defined in
+# `execution-environment/execution-environment.yml` (fast path: ~2s AWX Project
+# Sync when `collections/requirements.yml` is omitted), while
+# `ansible/collections/requirements.yml` provides automatic Galaxy installation
+# during AWX Project Sync as a fallback when no custom EE is used.
+collections:
+  - name: ansible.windows
+    version: ">=2.2.0"
+  - name: ansible.posix
+    version: ">=1.5.4"
+  - name: community.general
+    version: ">=8.3.0"

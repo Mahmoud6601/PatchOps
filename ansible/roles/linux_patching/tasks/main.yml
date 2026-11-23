@@ -1,0 +1,250 @@
+---
+- name: "Stage 2: Pre-check - validate Linux package manager compatibility"
+  ansible.builtin.assert:
+    that:
+      - ansible_system == 'Linux'
+      - ansible_os_family in ['Debian', 'RedHat', 'Suse']
+    fail_msg: "Unsupported Linux update target '{{ ansible_distribution }}' / '{{ ansible_os_family }}'."
+  when: not (reboot_only | default(false) | bool)
+
+- name: "Stage 2: Pre-check - verify free space on root filesystem"
+  ansible.builtin.assert:
+    that:
+      - (ansible_mounts | selectattr('mount', 'equalto', '/') | map(attribute='size_available') | first | default(0) | int) > 2147483648
+    fail_msg: "Pre-check failed: less than 2 GiB is available on the root filesystem."
+    success_msg: "Pre-check passed: at least 2 GiB is available on the root filesystem."
+  when: not (reboot_only | default(false) | bool) and not (clean_cache_only | default(false) | bool)
+
+- name: "Stage 2: Pre-check - require reboot detection tool for RPM systems"
+  ansible.builtin.command: command -v needs-restarting
+  args:
+    executable: /bin/sh
+  register: reboot_tool_check
+  changed_when: false
+  failed_when: false
+  when:
+    - ansible_os_family in ['RedHat', 'Suse']
+    - not (reboot_only | default(false) | bool)
+    - not (clean_cache_only | default(false) | bool)
+
+- name: "Stage 2: Pre-check - stop when reboot status cannot be determined"
+  ansible.builtin.assert:
+    that:
+      - reboot_tool_check.rc == 0
+    fail_msg: "Install the supported needs-restarting utility before patching this RPM-based host."
+  when:
+    - ansible_os_family in ['RedHat', 'Suse']
+    - not (reboot_only | default(false) | bool)
+    - not (clean_cache_only | default(false) | bool)
+
+- name: "Stage 2: Pre-check - confirm security classification is available for APT"
+  ansible.builtin.assert:
+    that:
+      - apt_update_inventory is defined
+      - (apt_update_inventory.stdout | from_json).security_packages is defined
+    fail_msg: "APT security updates could not be classified from repository metadata. No packages were changed."
+  when:
+    - not (reboot_only | default(false) | bool)
+    - not (clean_cache_only | default(false) | bool)
+    - ansible_os_family == 'Debian'
+    - update_type | default('security') == 'security'
+
+- name: "Stage 3: Update - install only APT packages offered by security archives"
+  ansible.builtin.apt:
+    name: "{{ (apt_update_inventory.stdout | from_json).security_packages }}"
+    state: latest
+    only_upgrade: true
+    update_cache: true
+    cache_valid_time: 3600
+  register: apt_security_result
+  when:
+    - not (reboot_only | default(false) | bool)
+    - not (clean_cache_only | default(false) | bool)
+    - ansible_os_family == 'Debian'
+    - update_type | default('security') == 'security'
+    - (apt_update_inventory.stdout | from_json).security_packages | length > 0
+
+- name: "Stage 3: Update - report no classified APT security updates"
+  ansible.builtin.debug:
+    msg: "No upgradable package candidate was published by a security archive."
+  when:
+    - not (reboot_only | default(false) | bool)
+    - not (clean_cache_only | default(false) | bool)
+    - ansible_os_family == 'Debian'
+    - update_type | default('security') == 'security'
+    - (apt_update_inventory.stdout | from_json).security_packages | length == 0
+
+- name: "Stage 3: Update - install approved APT regular updates"
+  ansible.builtin.apt:
+    upgrade: dist
+    update_cache: true
+    cache_valid_time: 3600
+  register: apt_regular_result
+  when:
+    - not (reboot_only | default(false) | bool)
+    - not (clean_cache_only | default(false) | bool)
+    - ansible_os_family == 'Debian'
+    - update_type | default('security') == 'regular'
+
+- name: "Stage 3: Update - install RHEL security updates"
+  ansible.builtin.dnf:
+    name: '*'
+    state: latest
+    security: true
+    update_only: true
+  register: dnf_security_result
+  when:
+    - not (reboot_only | default(false) | bool)
+    - not (clean_cache_only | default(false) | bool)
+    - ansible_os_family == 'RedHat'
+    - update_type | default('security') == 'security'
+
+- name: "Stage 3: Update - install RHEL regular updates"
+  ansible.builtin.dnf:
+    name: '*'
+    state: latest
+    update_only: true
+  register: dnf_regular_result
+  when:
+    - not (reboot_only | default(false) | bool)
+    - not (clean_cache_only | default(false) | bool)
+    - ansible_os_family == 'RedHat'
+    - update_type | default('security') == 'regular'
+
+- name: "Load SUSE patch workflow"
+  ansible.builtin.include_tasks: suse.yml
+  when: ansible_os_family == 'Suse'
+
+- name: "Stage 3: Update - record completed Linux package identifiers"
+  ansible.builtin.debug:
+    msg:
+      updates: >-
+        {{ (apt_update_inventory.stdout | from_json).security_packages if ansible_os_family == 'Debian' and update_type | default('security') == 'security' else
+           (apt_update_inventory.stdout | from_json).pending_packages if ansible_os_family == 'Debian' else
+           dnf_security_result.results | default([]) if ansible_os_family == 'RedHat' and update_type | default('security') == 'security' else
+           dnf_regular_result.results | default([]) if ansible_os_family == 'RedHat' else
+           zypper_security_result.results | default(zypper_security_result.changes | default([])) if ansible_os_family == 'Suse' and update_type | default('security') == 'security' else
+           zypper_regular_result.results | default(zypper_regular_result.changes | default([])) if ansible_os_family == 'Suse' else [] }}
+  when:
+    - not (reboot_only | default(false) | bool)
+    - not (clean_cache_only | default(false) | bool)
+    - update_type | default('security') in ['security', 'regular']
+    - >-
+      (apt_security_result is defined and apt_security_result.changed | default(false)) or
+      (apt_regular_result is defined and apt_regular_result.changed | default(false)) or
+      (dnf_security_result is defined and dnf_security_result.changed | default(false)) or
+      (dnf_regular_result is defined and dnf_regular_result.changed | default(false)) or
+      (zypper_security_result is defined and zypper_security_result.changed | default(false)) or
+      (zypper_regular_result is defined and zypper_regular_result.changed | default(false))
+
+- name: "Stage 3: Clean Linux Package Cache"
+  ansible.builtin.command: "{{ 'apt-get clean' if ansible_os_family == 'Debian' else 'dnf clean all' if ansible_os_family == 'RedHat' else 'zypper clean --all' }}"
+  changed_when: true
+  when: clean_cache_only | default(false) | bool
+
+- name: "Stage 4: Reboot - check Debian reboot marker after package installation"
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: post_patch_debian_reboot
+  when:
+    - ansible_os_family == 'Debian'
+    - not (reboot_only | default(false) | bool)
+    - not (clean_cache_only | default(false) | bool)
+
+- name: "Stage 4: Reboot - check RPM reboot requirement after package installation"
+  ansible.builtin.command: needs-restarting -r
+  register: post_patch_rpm_reboot
+  changed_when: false
+  failed_when: post_patch_rpm_reboot.rc not in [0, 1]
+  when:
+    - ansible_os_family in ['RedHat', 'Suse']
+    - not (reboot_only | default(false) | bool)
+    - not (clean_cache_only | default(false) | bool)
+
+- name: "Stage 4: Reboot - set verified reboot state"
+  ansible.builtin.set_fact:
+    patching_reboot_required: >-
+      {{ (reboot_only | default(false) | bool) or
+         (force_reboot | default(false) | bool) or
+         (post_patch_debian_reboot.stat.exists | default(false) if (post_patch_debian_reboot is defined and post_patch_debian_reboot.stat is defined) else
+          post_patch_rpm_reboot.rc | default(0) == 1) }}
+    patching_reboot_status_known: true
+  when: not (clean_cache_only | default(false) | bool)
+
+- name: "Stage 4: Reboot - perform controlled Linux reboot when required"
+  ansible.builtin.reboot:
+    msg: "Reboot requested by the Enterprise OS Patching Platform"
+    connect_timeout: 10
+    reboot_timeout: 900
+    pre_reboot_delay: 2
+    post_reboot_delay: 15
+    test_command: uptime
+  register: linux_reboot_result
+  when:
+    - not (clean_cache_only | default(false) | bool)
+    - patching_reboot_required | default(false) | bool
+
+- name: "Stage 4: Reboot - record that no reboot is needed"
+  ansible.builtin.debug:
+    msg: "No reboot was required by the package or kernel checks."
+  when:
+    - not (clean_cache_only | default(false) | bool)
+    - not (patching_reboot_required | default(false) | bool)
+
+- name: "Stage 5: Verification - confirm the host is reachable after patching"
+  ansible.builtin.command: uname -r
+  register: final_kernel
+  changed_when: false
+  when: not (reboot_only | default(false) | bool) and not (clean_cache_only | default(false) | bool)
+
+- name: "Stage 5: Verification - refresh APT package classification"
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 0
+  changed_when: false
+  when: ansible_os_family == 'Debian' and not (reboot_only | default(false) | bool) and not (clean_cache_only | default(false) | bool)
+
+- name: "Stage 5: Verification - recount APT pending and security updates"
+  ansible.builtin.script: apt_update_inventory.py
+  register: final_apt_inventory
+  changed_when: false
+  when: ansible_os_family == 'Debian' and not (reboot_only | default(false) | bool) and not (clean_cache_only | default(false) | bool)
+
+- name: "Stage 5: Verification - recount RPM pending updates in check mode"
+  ansible.builtin.dnf:
+    name: '*'
+    state: latest
+    update_only: true
+  check_mode: true
+  register: final_dnf_inventory
+  changed_when: false
+  when: ansible_os_family == 'RedHat' and not (reboot_only | default(false) | bool) and not (clean_cache_only | default(false) | bool)
+
+- name: "Stage 5: Verification - recount RPM security updates in check mode"
+  ansible.builtin.dnf:
+    name: '*'
+    state: latest
+    update_only: true
+    security: true
+  check_mode: true
+  register: final_dnf_security_inventory
+  changed_when: false
+  when: ansible_os_family == 'RedHat' and not (reboot_only | default(false) | bool) and not (clean_cache_only | default(false) | bool)
+
+
+- name: "Load SUSE verification workflow"
+  ansible.builtin.include_tasks: suse_verify.yml
+  when: ansible_os_family == 'Suse'
+
+- name: "Stage 5: Verification - emit real Linux patch result"
+  ansible.builtin.debug:
+    msg:
+      stage: Verification
+      status: Success
+      kernel: "{{ final_kernel.stdout }}"
+      reboot_performed: "{{ linux_reboot_result.rebooted | default(false) }}"
+      reboot_required: "{{ patching_reboot_required | default(false) | bool }}"
+      reboot_status_known: true
+      pending_updates: "{{ (final_apt_inventory.stdout | from_json).pending_count if (final_apt_inventory is defined and final_apt_inventory.stdout is defined and ansible_os_family == 'Debian') else final_dnf_inventory.results | default([]) | length if (final_dnf_inventory is defined and ansible_os_family == 'RedHat') else final_suse_inventory.results | default([]) | length if (final_suse_inventory is defined and ansible_os_family == 'Suse') else 0 }}"
+      security_updates: "{{ (final_apt_inventory.stdout | from_json).security_count if (final_apt_inventory is defined and final_apt_inventory.stdout is defined and ansible_os_family == 'Debian') else final_dnf_security_inventory.results | default([]) | length if (final_dnf_security_inventory is defined and ansible_os_family == 'RedHat') else final_suse_security_inventory.results | default([]) | length if (final_suse_security_inventory is defined and ansible_os_family == 'Suse') else 0 }}"
+  when: not (reboot_only | default(false) | bool) and not (clean_cache_only | default(false) | bool)

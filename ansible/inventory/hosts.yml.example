@@ -1,0 +1,15 @@
+all:
+  children:
+    linux:
+      hosts:
+        linux-host-01:
+          ansible_host: 192.0.2.10
+          ansible_connection: ssh
+    windows:
+      hosts:
+        windows-host-01:
+          ansible_host: 192.0.2.20
+          ansible_connection: winrm
+
+# Copy this file to hosts.yml only for local syntax or lab runs.
+# Store connection credentials in AWX Credentials or an external secrets manager.

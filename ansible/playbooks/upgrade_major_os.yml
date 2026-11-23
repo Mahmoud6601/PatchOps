@@ -1,0 +1,13 @@
+---
+- name: "Major OS Version Upgrade Pipeline (Gated)"
+  hosts: all
+  become: "{{ ansible_connection | default('ssh') != 'winrm' }}"
+  tasks:
+    - name: Run discovery workflow
+      ansible.builtin.include_role:
+        name: discovery
+
+    - name: Run major Linux upgrade workflow
+      ansible.builtin.include_role:
+        name: major_upgrade
+      when: ansible_system == "Linux"

@@ -1,0 +1,52 @@
+---
+- name: "Stage 1: Discovery - configure host WinRM operation timeout"
+  ansible.windows.win_powershell:
+    script: |
+      # Configure WinRM operation timeout to 4 hours (14,400,000 ms)
+      try {
+          Set-Item -Path WSMan:\LocalHost\MaxTimeoutms -Value 14400000 -ErrorAction Stop
+      } catch {
+          # Ensure network category allows WinRM modifications if set to Public
+          Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
+          Set-Item -Path WSMan:\LocalHost\MaxTimeoutms -Value 14400000 -ErrorAction SilentlyContinue
+      }
+  changed_when: false
+
+- name: "Stage 1: Discovery - search Windows updates"
+  ansible.windows.win_updates:
+    category_names: '*'
+    state: searched
+  register: windows_update_inventory
+
+- name: "Stage 1: Discovery - inspect Windows reboot registry markers"
+  ansible.windows.win_reg_stat:
+    path: "{{ item }}"
+  loop:
+    - HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired
+    - HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending
+  register: windows_reboot_markers
+
+- name: "Stage 1: Discovery - collect Windows update and reboot counts"
+  ansible.builtin.set_fact:
+    pending_updates_count: "{{ windows_update_inventory.found_update_count | default(0) | int }}"
+    security_updates_count: >-
+      {{ windows_update_inventory.updates | default({}) | dict2items |
+         selectattr('value.categories', 'defined') |
+         selectattr('value.categories', 'contains', 'Security Updates') | list | length }}
+    patching_reboot_required: "{{ windows_reboot_markers.results | selectattr('exists') | list | length > 0 }}"
+    patching_reboot_status_known: true
+
+- name: "Stage 1: Discovery - emit Windows system metadata"
+  ansible.builtin.debug:
+    msg:
+      os_name: "{{ ansible_distribution }}"
+      os_version: "{{ ansible_distribution_version }}"
+      kernel: "{{ ansible_kernel }}"
+      arch: "{{ ansible_architecture }}"
+      cpu_cores: "{{ ansible_processor_vcpus | default(ansible_processor_count | default(1)) }}"
+      ram_mb: "{{ ansible_memtotal_mb | default(0) }}"
+      reboot_required: "{{ patching_reboot_required }}"
+      reboot_status_known: "{{ patching_reboot_status_known }}"
+      pending_updates: "{{ pending_updates_count }}"
+      security_updates: "{{ security_updates_count }}"
+      package_manager: windows_update

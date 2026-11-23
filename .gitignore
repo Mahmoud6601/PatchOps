@@ -1,0 +1,48 @@
+# Python / Backend
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+.venv/
+env/
+.pytest_cache/
+.coverage
+htmlcov/
+*.db
+*.sqlite3
+
+# Secrets & Environment Files (NEVER commit real credentials)
+.env
+.env.*
+!.env.example
+patching.env
+*.pem
+*.key
+*.crt
+*kubeconfig*
+k3s.yaml
+
+# Node / Frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Ansible Runtime / Local Inventories
+ansible/inventory/hosts.yml
+*.retry
+
+# Backups, Temp & Editor Files
+*.bak
+*.tmp
+*.swp
+*~
+src_backup*/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
